@@ -10,23 +10,20 @@ use std::io::{stdin, stdout};
 use std::{env, io::Write};
 
 enum Command {
+    Help,
     Step,
     Continue,
     ViewRegisters,
-    Read(*mut c_void),
-    Write(*mut c_void, *mut c_void),
     Quit,
     Unknown,
+    Read(*mut c_void),
+    Write(*mut c_void, *mut c_void),
 }
 
 fn main() {
     println!(
-        "NEXTDB DEBUGGER\nCommands: s = step, reg = registers, c = continue running, q = quit"
+        "NEXTDB DEBUGGER\nType \"help\" for command list!"
     );
-
-    // if env::args().len() != 2 {
-    //     panic!("Please supply a single argument, the target program!");
-    // }
 
     let target_program = env::args().map(|arg| CString::new(arg).unwrap()).nth(1);
 
@@ -106,17 +103,13 @@ fn run_debugger(target_pid: Pid) {
                         break 'outer;
                     }
 
-                    Command::Read(addr) => {
-                        read_word_memory_region(target_pid, addr);
-                    }
+                    Command::Help => print_help(),
 
-                    Command::Write(addr, word) => {
-                        write_word(target_pid, addr, word);
-                    }
+                    Command::Read(addr) => read_word(target_pid, addr),
 
-                    Command::ViewRegisters => {
-                        print_register_status(target_pid);
-                    }
+                    Command::Write(addr, word) => write_word(target_pid, addr, word),
+
+                    Command::ViewRegisters => print_register_status(target_pid),
 
                     Command::Step => {
                         ptrace::step(target_pid, None).expect("single step ptrace message failed!");
@@ -129,9 +122,7 @@ fn run_debugger(target_pid: Pid) {
                         break 'outer;
                     }
 
-                    Command::Unknown => {
-                        eprintln!("Err: Unknown command, please input an available command!")
-                    }
+                    Command::Unknown => eprintln!("Err: Unknown command, please input an available command!")
                 },
 
                 Ok(WaitStatus::Stopped(_, Signal::SIGSEGV)) => {
@@ -157,6 +148,15 @@ fn run_debugger(target_pid: Pid) {
     }
 }
 
+fn print_help() {
+    println!(
+        "Commands:\ns/step = step through process\nc/continue = run through process\n\
+        reg/registers = get register contents\nq/quit = quit debugger and kill process\n\
+        r/read <hex address> = read word from process address space\nw/write <hex address> <hex value>\
+        = write word to address in process space"
+    );
+}
+
 fn accept_user_input() -> Command {
     print!("> ");
     stdout().flush().unwrap();
@@ -175,36 +175,40 @@ fn accept_user_input() -> Command {
     match command {
         // Commands with no operands
         "reg" | "registers" => Command::ViewRegisters,
-        "s" | "step"        => Command::Step,
-        "c" | "continue"    => Command::Continue,
-        "q" | "quit"        => Command::Quit,
+        "s" | "step" => Command::Step,
+        "c" | "continue" => Command::Continue,
+        "q" | "quit" => Command::Quit,
+        "h" | "help" => Command::Help,
 
-        //Commands with a single operand
+        // Commands with a single operand
         "r" | "read" => {
             if let Some(read_addr) = args_iter.nth(0) {
                 if let Ok(parsed_addr) = usize::from_str_radix(read_addr, 16) {
                     Command::Read(parsed_addr as *mut c_void)
                 } else {
-                    println!("Failed to parse to usize!");
+                    eprintln!("Failed to parse args!");
                     Command::Unknown
                 }
             } else {
-                println!("Failed to get operand!");
+                eprintln!("Insufficient args!");
                 Command::Unknown
             }
-        },
+        }
 
+        // Commands with two operands
         "w" | "write" => {
-            if let (Some(write_addr), Some(write_word)) = (args_iter.nth(0), args_iter.nth(0)) {
-                if let (Ok(parsed_addr), Ok(parsed_word)) 
-                    = (usize::from_str_radix(write_addr, 16), usize::from_str_radix(write_word, 16)) {
+            if let (Some(write_addr), Some(write_word)) = (args_iter.next(), args_iter.next()) {
+                if let (Ok(parsed_addr), Ok(parsed_word)) = (
+                    usize::from_str_radix(write_addr, 16),
+                    usize::from_str_radix(write_word, 16),
+                ) {
                     Command::Write(parsed_addr as *mut c_void, parsed_word as *mut c_void)
                 } else {
-                    println!("Failed to parse write!");
+                    eprintln!("Failed to parse args!");
                     Command::Unknown
                 }
             } else {
-                println!("Insufficient args!");
+                eprintln!("Insufficient args!");
                 Command::Unknown
             }
         }
@@ -214,23 +218,23 @@ fn accept_user_input() -> Command {
 }
 
 fn print_register_status(target_pid: Pid) {
-    let regs =
-        ptrace::getregs(target_pid).expect("Failed to get register status using ptrace!");
+    let regs = ptrace::getregs(target_pid).expect("Failed to get register status using ptrace!");
 
     println!(
         "%RIP: {:#0x}\n\
         %RAX: {:#0x}\n%RBX {:#0x}\n%RCX: {:#0x}\n%RDX: {:#0x}\n\
         %RBP: {:#0x}\n%RSP: {:#0x}\n%RSI: {:#0x}\n%RDI: {:#0x}",
-        regs.rip, regs.rax, regs.rbx, regs.rcx, regs.rdx,
-        regs.rbp, regs.rsp, regs.rsi, regs.rdi
+        regs.rip, regs.rax, regs.rbx, regs.rcx, regs.rdx, regs.rbp, regs.rsp, regs.rsi, regs.rdi
     );
 }
 
-fn read_word_memory_region(target_pid: Pid, addr: *mut c_void) {
+fn read_word(target_pid: Pid, addr: *mut c_void) {
     let res = ptrace::read(target_pid, addr).expect("Failed to send PTRACE_PEEK message!");
     println!("@{:#0x}: {:#0x}", addr as usize, res);
 }
 
 fn write_word(target_pid: Pid, addr: *mut c_void, word: *mut c_void) {
-    unsafe { ptrace::write(target_pid, addr, word).expect("Failed to send PTRACE_POKE message!"); }
+    unsafe {
+        ptrace::write(target_pid, addr, word).expect("Failed to send PTRACE_POKE message!");
+    }
 }
