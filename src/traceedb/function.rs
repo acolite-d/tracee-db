@@ -1,14 +1,14 @@
-use super::command::{Command, accept_user_input};
+use super::command::*;
 use nix::{
     sys::ptrace,
     sys::signal::{kill, Signal},
     sys::wait::{waitpid, WaitStatus},
-    unistd::{Pid, execv},
+    unistd::{execv, Pid},
 };
 
 use std::ffi::{c_void, CStr};
-use std::io::{stdin, stdout};
 use std::io::Write;
+use std::io::{stdin, stdout};
 
 pub fn print_register_status(target_pid: Pid) {
     let regs = ptrace::getregs(target_pid).expect("Failed to get register status using ptrace!");
@@ -33,12 +33,7 @@ pub fn write_word(target_pid: Pid, addr: *mut c_void, word: *mut c_void) {
 }
 
 pub fn print_help() {
-    println!(
-        "Commands:\ns/step = step through process\nc/continue = run through process\n\
-        reg/registers = get register contents\nq/quit = quit debugger and kill process\n\
-        r/read <hex address> = read word from process address space\nw/write <hex address> <hex value>\
-        = write word to address in process space"
-    );
+
 }
 
 pub fn run_get_pid_dialogue() -> Pid {
@@ -115,7 +110,9 @@ pub fn run_debugger(target_pid: Pid) {
                         break 'outer;
                     }
 
-                    Command::Unknown => eprintln!("Err: Unknown command, please input an available command!")
+                    Command::Unknown => {
+                        eprintln!("Err: Unknown command, please input an available command!")
+                    }
                 },
 
                 Ok(WaitStatus::Stopped(_, Signal::SIGSEGV)) => {
