@@ -3,12 +3,79 @@ use nix::{
     sys::ptrace,
     sys::signal::{kill, Signal},
     sys::wait::{waitpid, WaitStatus},
-    unistd::{execv, Pid},
+    unistd::{fork, execv, ForkResult, Pid},
 };
 
-use std::ffi::{c_void, CStr};
+use std::ffi::{c_void, CString, CStr};
 use std::io::Write;
 use std::io::{stdin, stdout};
+
+
+#[derive(Debug)]
+pub struct TraceeDb {
+    target_exec: Option<CString>,
+    initial_break: Option<CString>
+}
+
+impl TraceeDb {
+    
+    pub fn builder() -> TraceeBuilder {
+        TraceeBuilder::default()
+    }
+
+    pub fn run(self) {
+        if let Some(ref prog_name) = self.target_exec {
+            match unsafe { fork() } {
+                Ok(ForkResult::Parent { child, .. }) => {
+                    //
+    
+                    println!("Spawned child process {}", child);
+                    run_debugger(child);
+                }
+    
+                Ok(ForkResult::Child) => {
+                    run_target(prog_name.as_c_str());
+                }
+    
+                Err(_) => panic!("Failed to fork process, exiting..."),
+            }
+        } else {
+            let target_pid = run_get_pid_dialogue();
+    
+            ptrace::attach(target_pid).expect("Failed to attach to running process!");
+            run_debugger(target_pid);
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct TraceeBuilder {
+    target_exec: Option<CString>,
+    initial_break: Option<CString>
+}
+
+impl TraceeBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn target_exec(mut self, target_exec: Option<CString>) -> Self {
+        self.target_exec = target_exec;
+        self
+    }
+
+    pub fn initial_break(mut self, initial_break: Option<CString>) -> Self {
+        self.initial_break = initial_break;
+        self
+    }
+
+    pub fn build(self) -> TraceeDb {
+        TraceeDb { 
+            target_exec: self.target_exec, 
+            initial_break: self.initial_break
+        }
+    }
+}
 
 pub fn print_register_status(target_pid: Pid) {
     let regs = ptrace::getregs(target_pid).expect("Failed to get register status using ptrace!");
