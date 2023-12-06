@@ -9,7 +9,8 @@ use nix::{
 use std::ffi::c_void;
 use std::io::{stdin, stdout, Write};
 
-pub trait Cmd {
+
+pub trait Execute {
     fn execute(self, pid: Pid) -> ();
 }
 
@@ -30,7 +31,7 @@ macro_rules! define_help {
 #[derive(Debug)]
 pub struct Step;
 
-impl Cmd for Step {
+impl Execute for Step {
     fn execute(self, pid: Pid) -> () {
         ptrace::step(pid, None).expect("single step ptrace message failed!");
     }
@@ -41,7 +42,7 @@ define_help!(Step, "s/step = step through process");
 #[derive(Debug)]
 pub struct Continue;
 
-impl Cmd for Continue {
+impl Execute for Continue {
     fn execute(self, pid: Pid) -> () {
         ptrace::cont(pid, None).expect("PTRACE_CONT message failed to send!");
     }
@@ -52,7 +53,7 @@ define_help!(Continue, "c/continue = run through process");
 #[derive(Debug)]
 pub struct ViewRegisters;
 
-impl Cmd for ViewRegisters {
+impl Execute for ViewRegisters {
     fn execute(self, pid: Pid) -> () {
         function::print_register_status(pid);
     }
@@ -63,7 +64,7 @@ define_help!(ViewRegisters, "reg/registers = view register contents");
 #[derive(Debug)]
 pub struct Quit;
 
-impl Cmd for Quit {
+impl Execute for Quit {
     fn execute(self, pid: Pid) -> () {
         ptrace::kill(pid).expect("Failed to kill process!");
     }
@@ -74,7 +75,7 @@ define_help!(Quit, "q/quit = quit debugger and kill process");
 #[derive(Debug)]
 pub struct HelpMe;
 
-impl Cmd for HelpMe {
+impl Execute for HelpMe {
     fn execute(self, _pid: Pid) -> () {
         function::print_help();
     }
@@ -87,7 +88,7 @@ pub struct ReadWord {
     addr: *mut c_void,
 }
 
-impl Cmd for ReadWord {
+impl Execute for ReadWord {
     fn execute(self, pid: Pid) -> () {
         function::read_word(pid, self.addr);
     }
@@ -104,7 +105,7 @@ pub struct WriteWord {
     val: *mut c_void,
 }
 
-impl Cmd for WriteWord {
+impl Execute for WriteWord {
     fn execute(self, pid: Pid) -> () {
         function::write_word(pid, self.addr, self.val);
     }
@@ -116,10 +117,14 @@ define_help!(
 );
 
 // fn debugger_loop() -> () {
+//     let current_cmd: 
+
 //     'process_loop: loop {
 //         let wait_status = waitpid(target_pid, None);
 
 //         'input_loop: loop {
+
+
 
 //             match get_cmd() {
 //                 Ok(cmd) => {
@@ -134,8 +139,10 @@ define_help!(
 //     }
 // }
 
-// fn get_cmd() -> &mut dyn Cmd {
-    
+// fn get_cmd<C>() -> Box<dyn C>
+//     where C: Execute + Help
+// {
+//     Box::new(Quit)
 // }
 
 // pub fn get_cmd() -> Box<dyn Cmd> {

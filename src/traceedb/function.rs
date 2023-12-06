@@ -3,22 +3,20 @@ use nix::{
     sys::ptrace,
     sys::signal::{kill, Signal},
     sys::wait::{waitpid, WaitStatus},
-    unistd::{fork, execv, ForkResult, Pid},
+    unistd::{execv, fork, ForkResult, Pid},
 };
 
-use std::ffi::{c_void, CString, CStr};
+use std::ffi::{c_void, CStr, CString};
 use std::io::Write;
 use std::io::{stdin, stdout};
-
 
 #[derive(Debug)]
 pub struct TraceeDb {
     target_exec: Option<CString>,
-    initial_break: Option<CString>
+    initial_break: Option<CString>,
 }
 
 impl TraceeDb {
-    
     pub fn builder() -> TraceeBuilder {
         TraceeBuilder::default()
     }
@@ -28,20 +26,20 @@ impl TraceeDb {
             match unsafe { fork() } {
                 Ok(ForkResult::Parent { child, .. }) => {
                     //
-    
+
                     println!("Spawned child process {}", child);
                     run_debugger(child);
                 }
-    
+
                 Ok(ForkResult::Child) => {
                     run_target(prog_name.as_c_str());
                 }
-    
+
                 Err(_) => panic!("Failed to fork process, exiting..."),
             }
         } else {
             let target_pid = run_get_pid_dialogue();
-    
+
             ptrace::attach(target_pid).expect("Failed to attach to running process!");
             run_debugger(target_pid);
         }
@@ -51,7 +49,7 @@ impl TraceeDb {
 #[derive(Default)]
 pub struct TraceeBuilder {
     target_exec: Option<CString>,
-    initial_break: Option<CString>
+    initial_break: Option<CString>,
 }
 
 impl TraceeBuilder {
@@ -70,9 +68,9 @@ impl TraceeBuilder {
     }
 
     pub fn build(self) -> TraceeDb {
-        TraceeDb { 
-            target_exec: self.target_exec, 
-            initial_break: self.initial_break
+        TraceeDb {
+            target_exec: self.target_exec,
+            initial_break: self.initial_break,
         }
     }
 }
@@ -99,9 +97,7 @@ pub fn write_word(target_pid: Pid, addr: *mut c_void, word: *mut c_void) {
     }
 }
 
-pub fn print_help() {
-
-}
+pub fn print_help() {}
 
 pub fn run_get_pid_dialogue() -> Pid {
     let mut input = String::new();
