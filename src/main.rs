@@ -19,7 +19,9 @@ use std::ffi::CString;
 fn main() {
     println!("NEXTDB DEBUGGER\nType \"help\" for command list!");
 
-    let mut args = env::args().map(|arg| CString::new(arg).unwrap());
+    let mut args = env::args()
+        .skip(1)
+        .map(|arg| CString::new(arg).expect("Improper input!"));
 
     TraceeDb::builder()
         .target_exec(args.next())

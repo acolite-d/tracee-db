@@ -1,5 +1,8 @@
-use super::command::*;
+use crate::traceedb::command::*;
+
 use nix::{
+    errno::Errno,
+    libc::c_long,
     sys::ptrace,
     sys::signal::{kill, Signal},
     sys::wait::{waitpid, WaitStatus},
@@ -53,10 +56,6 @@ pub struct TraceeBuilder {
 }
 
 impl TraceeBuilder {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn target_exec(mut self, target_exec: Option<CString>) -> Self {
         self.target_exec = target_exec;
         self
@@ -75,29 +74,24 @@ impl TraceeBuilder {
     }
 }
 
-pub fn print_register_status(target_pid: Pid) {
-    let regs = ptrace::getregs(target_pid).expect("Failed to get register status using ptrace!");
-
-    println!(
-        "%RIP: {:#0x}\n\
-        %RAX: {:#0x}\n%RBX {:#0x}\n%RCX: {:#0x}\n%RDX: {:#0x}\n\
-        %RBP: {:#0x}\n%RSP: {:#0x}\n%RSI: {:#0x}\n%RDI: {:#0x}",
-        regs.rip, regs.rax, regs.rbx, regs.rcx, regs.rdx, regs.rbp, regs.rsp, regs.rsi, regs.rdi
-    );
+pub fn read_word(target_pid: Pid, addr: *mut c_void) -> Result<c_long, Errno> {
+    ptrace::read(target_pid, addr)
 }
 
-pub fn read_word(target_pid: Pid, addr: *mut c_void) {
-    let res = ptrace::read(target_pid, addr).expect("Failed to send PTRACE_PEEK message!");
-    println!("@{:#0x}: {:#0x}", addr as usize, res);
+pub fn write_word(target_pid: Pid, addr: *mut c_void, word: *mut c_void) -> Result<(), Errno> {
+    unsafe { ptrace::write(target_pid, addr, word) }
 }
 
-pub fn write_word(target_pid: Pid, addr: *mut c_void, word: *mut c_void) {
-    unsafe {
-        ptrace::write(target_pid, addr, word).expect("Failed to send PTRACE_POKE message!");
-    }
+pub fn print_help() {
+    println!("List of Commands:");
+    Step::help();
+    Continue::help();
+    ViewRegisters::help();
+    ReadWord::help();
+    WriteWord::help();
+    Quit::help();
+    HelpMe::help();
 }
-
-pub fn print_help() {}
 
 pub fn run_get_pid_dialogue() -> Pid {
     let mut input = String::new();
@@ -142,41 +136,34 @@ pub fn run_target(prog_name: &CStr) {
 pub fn run_debugger(target_pid: Pid) {
     println!("Entering debugging loop...");
 
-    'outer: loop {
+    'await_process: loop {
         let wait_status = waitpid(target_pid, None);
 
-        loop {
+        'await_user: loop {
+
             match wait_status {
                 Ok(WaitStatus::Stopped(_, Signal::SIGTRAP))
-                | Ok(WaitStatus::Stopped(_, Signal::SIGSTOP)) => match accept_user_input() {
-                    Command::Quit => {
-                        ptrace::kill(target_pid).expect("Failed to kill process!");
-                        break 'outer;
+                | Ok(WaitStatus::Stopped(_, Signal::SIGSTOP)) => {
+                    match prompt_user_cmd().and_then(|cmd| cmd.execute(target_pid)) {
+                        Ok(TargetStat::AwaitingCommand) => {
+                            continue 'await_user;
+                        }
+
+                        Ok(TargetStat::Running) => {
+                            continue 'await_process;
+                        }
+
+                        Ok(TargetStat::Killed) => {
+                            println!("Process killed, exiting...");
+                            break 'await_process;
+                        }
+
+                        Err(err_msg) => {
+                            eprintln!("Err: {}", err_msg);
+                            continue;
+                        }
                     }
-
-                    Command::Help => print_help(),
-
-                    Command::Read(addr) => read_word(target_pid, addr),
-
-                    Command::Write(addr, word) => write_word(target_pid, addr, word),
-
-                    Command::ViewRegisters => print_register_status(target_pid),
-
-                    Command::Step => {
-                        ptrace::step(target_pid, None).expect("single step ptrace message failed!");
-                        continue 'outer;
-                    }
-
-                    Command::Continue => {
-                        ptrace::cont(target_pid, None)
-                            .expect("PTRACE_CONT message failed to send!");
-                        break 'outer;
-                    }
-
-                    Command::Unknown => {
-                        eprintln!("Err: Unknown command, please input an available command!")
-                    }
-                },
+                }
 
                 Ok(WaitStatus::Stopped(_, Signal::SIGSEGV)) => {
                     println!("Child process received SIGSEGV, segfaulted!");
