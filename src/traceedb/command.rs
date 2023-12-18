@@ -1,17 +1,16 @@
+use crate::traceedb::symbol::src_line_to_addr;
+
 use super::function;
 
-use nix::{
-    sys::ptrace,
-    unistd::Pid,
-};
+use nix::{sys::ptrace, unistd::Pid};
 
-use std::io::{stdin, stdout, Write};
 use std::ffi::c_void;
+use std::io::{stdin, stdout, Write};
 
 pub enum TargetStat {
     AwaitingCommand,
     Running,
-    Killed
+    Killed,
 }
 
 pub trait Execute {
@@ -133,7 +132,7 @@ pub struct ReadWord {
 
 impl Execute for ReadWord {
     fn execute(&self, pid: Pid) -> Result<TargetStat, &'static str> {
-        function::read_word(pid, self.addr)
+        ptrace::read(pid, self.addr)
             .map(|val| {
                 println!("@ {:#0x}: {:#0x}", self.addr as usize, val);
                 TargetStat::AwaitingCommand
@@ -158,21 +157,40 @@ pub struct WriteWord {
 
 impl Execute for WriteWord {
     fn execute(&self, pid: Pid) -> Result<TargetStat, &'static str> {
-        function::write_word(pid, self.addr, self.val)
-            .map(|_| TargetStat::AwaitingCommand)
-            .map_err(|err_no| {
-                eprintln!("ERRNO {}", err_no);
-                "failed to PTRACE_CONT"
-            })
+        unsafe {
+            ptrace::write(pid, self.addr, self.val)
+                .map(|_| TargetStat::AwaitingCommand)
+                .map_err(|err_no| {
+                    eprintln!("ERRNO {}", err_no);
+                    "failed to PTRACE_CONT"
+                })
+        }
     }
 }
 
 define_help!(
     WriteWord,
-    "write <hex address> <hex value> = write word to address in process space"
+    "w/write <hex address> <hex value> = write word to address in process space"
 );
 
-pub fn prompt_user_cmd() -> Result<Box<dyn Execute>, &'static str> {
+pub struct Breakpoint {
+    addr: *mut c_void,
+}
+
+impl Execute for Breakpoint {
+    fn execute(&self, pid: Pid) -> Result<TargetStat, &'static str> {
+        todo!()
+    }
+}
+
+define_help!(
+    Breakpoint,
+    "b/breakpoint <file:line>/<address> = a standard breakpoint"
+);
+
+pub fn prompt_user_cmd(
+    symbols: Ref<'_, Option<Dwarf<borrow::Cow<'dwarf, [u8]>>>>
+) -> Result<Box<dyn Execute>, &'static str> {
     print!("> ");
     stdout().flush().unwrap();
 
@@ -227,6 +245,18 @@ pub fn prompt_user_cmd() -> Result<Box<dyn Execute>, &'static str> {
             } else {
                 Err("Insufficient arguments for command!")
             }
+        }
+        "b" | "breakpoint" => {
+            if let Some(arg) = args_iter.next() {
+                if let Ok(addr) = src_line_to_addr() {
+                    Ok(Box::new(Breakpoint{ addr }))
+                } else {
+                    Err("Failed to resolve symbol for breakpoint")
+                }
+            } else {
+                Err("Insufficient arguments for command!")
+            }
+            Err("todo")
         }
 
         _ => Err("Could not recognize command!"),
