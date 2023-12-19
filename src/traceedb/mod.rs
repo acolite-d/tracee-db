@@ -1,3 +1,3 @@
 pub mod command;
-pub mod function;
+pub mod dbg;
 pub mod symbol;

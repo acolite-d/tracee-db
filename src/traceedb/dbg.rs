@@ -14,22 +14,34 @@ use nix::{
 use std::borrow;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::ffi::{c_long, c_uint, c_void, CStr, CString};
+use std::ffi::{c_uint, c_void, CStr, CString};
 use std::io::Write;
 use std::io::{stdin, stdout};
+use std::ptr;
 
 #[derive(PartialEq, Debug)]
-struct BrkptRecord {
+pub struct BrkptRecord {
+    pid: Pid,
     pc_addr: *mut c_void,
-    original_insn: *mut c_void,
+    original_insn: i64,
 }
 
 impl BrkptRecord {
-    pub fn new(
-        pc_addr: *mut c_void, 
-        original_insn: *mut c_void
-    ) -> Self {
-        Self { pc_addr, original_insn }
+    pub fn new(pid: Pid, pc_addr: *mut c_void) -> Self {
+        let original_insn = peek_text(pid, pc_addr, ptr::null_mut()).unwrap();
+
+        Self {
+            pid,
+            pc_addr,
+            original_insn,
+        }
+    }
+
+    pub fn activate(&self) {
+        let trap = ((self.original_insn & 0xFFFFFF00) | 0xCC) as *mut c_void;
+        unsafe {
+            poke_text(self.pid, self.pc_addr, trap).unwrap();
+        }
     }
 }
 
@@ -37,7 +49,7 @@ impl BrkptRecord {
 pub struct TraceeDb<'dwarf> {
     program: Option<String>,
     breakpoints: RefCell<HashMap<u64, BrkptRecord>>,
-    symbols: RefCell<Option<Dwarf<borrow::Cow<'dwarf, [u8]>>>>,
+    symbols: Option<RefCell<Dwarf<borrow::Cow<'dwarf, [u8]>>>>,
 }
 
 impl<'dwarf> TraceeDb<'dwarf> {
@@ -81,18 +93,6 @@ impl<'dwarf> TraceeDb<'dwarf> {
         'await_process: loop {
             let wait_status = waitpid(target_pid, None);
 
-            let mut regs =
-                ptrace::getregs(target_pid).expect("FATAL: failed to send PTRACE_REGS");
-
-            if let Some(breakpoint) = self.breakpoints.borrow().get(&regs.rip) {
-                unsafe { 
-                    poke_text(target_pid, breakpoint.pc_addr, breakpoint.original_insn)
-                        .expect("failed to write to .text section with PTRACE_POKETEXT"); 
-                }
-                regs.rip -= 1;
-                ptrace::setregs(target_pid, regs).expect("FATAL: Failed to set regs");
-            }
-
             'await_user: loop {
                 match wait_status {
                     Ok(WaitStatus::Stopped(_, Signal::SIGTRAP))
@@ -101,7 +101,28 @@ impl<'dwarf> TraceeDb<'dwarf> {
                         // associated breakpoint. If PC == BPT_PC, then replace trap,
                         // rollback PC, and proceed.
 
-                        match prompt_user_cmd().and_then(|cmd| cmd.execute(target_pid)) {
+                        let mut regs =
+                            ptrace::getregs(target_pid).expect("FATAL: failed to send PTRACE_REGS");
+
+                        if let Some(breakpoint) = self.breakpoints.borrow().get(&regs.rip) {
+                            unsafe {
+                                poke_text(
+                                    target_pid,
+                                    breakpoint.pc_addr,
+                                    breakpoint.original_insn as *mut c_void,
+                                )
+                                .expect("failed to write to .text section with PTRACE_POKETEXT");
+                            }
+                            regs.rip -= 1;
+                            ptrace::setregs(target_pid, regs).expect("FATAL: Failed to set regs");
+                        }
+
+                        match prompt_user_cmd(
+                            self.symbols.as_ref().map(|cell| cell.borrow()),
+                            target_pid,
+                        )
+                        .and_then(|cmd| cmd.execute(target_pid))
+                        {
                             Ok(TargetStat::AwaitingCommand) => {
                                 continue 'await_user;
                             }
@@ -172,53 +193,39 @@ impl<'dwarf> TraceeBuilder<'dwarf> {
         TraceeDb {
             program: self.program,
             breakpoints: RefCell::new(HashMap::default()),
-            symbols: RefCell::new(self.symbols),
+            symbols: match self.symbols {
+                Some(sym) => Some(RefCell::new(sym)),
+                None => None,
+            },
         }
     }
 }
 
-// pub unsafe fn write_breakpoint(target_pid: Pid, addr: *mut c_void) {
-//     let insn = libc::ptrace(
-//         ptrace::Request::PTRACE_PEEKTEXT as c_uint,
-//         libc::pid_t::from(target_pid),
-//         addr
-//     );
-
-//     libc::ptrace(
-//         ptrace::Request::PTRACE_POKETEXT as c_uint,
-//         libc::pid_t::from(target_pid),
-//         addr,
-//         0x0
-//     );
-
-//     ptrace::cont(target_pid, None);
-
-//     libc::ptrace(
-//         ptrace::Request::PTRACE_POKETEXT as c_uint,
-//         libc::pid_t::from(target_pid),
-//         addr,
-//         insn
-//     );
-
-// }
-
 pub unsafe fn poke_text(pid: Pid, addr: *mut c_void, val: *mut c_void) -> Result<(), &'static str> {
-    libc::ptrace(
+    Errno::result(libc::ptrace(
         ptrace::Request::PTRACE_POKETEXT as c_uint,
         libc::pid_t::from(pid),
         addr,
         val,
-    );
-    Ok(())
+    ))
+    .map(|_| ())
+    .map_err(|_| "Failed at PTRACE_POKETEXT message!")
 }
 
-pub unsafe fn peek_text(pid: Pid, addr: *mut c_void) -> Result<(), &'static str> {
-    libc::ptrace(
-        ptrace::Request::PTRACE_PEEKTEXT as c_uint,
-        libc::pid_t::from(pid),
-        addr
-    );
-    Ok(())
+pub fn peek_text(pid: Pid, addr: *mut c_void, data: *mut c_void) -> Result<i64, &'static str> {
+    let ret = unsafe {
+        Errno::clear();
+        libc::ptrace(
+            ptrace::Request::PTRACE_PEEKTEXT as c_uint,
+            libc::pid_t::from(pid),
+            addr,
+            data,
+        )
+    };
+    match Errno::result(ret) {
+        Ok(..) | Err(Errno::UnknownErrno) => Ok(ret),
+        Err(..) => Err("Failed to send PTRACE_PEEKTEXT message!"),
+    }
 }
 
 pub fn print_help() {

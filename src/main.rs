@@ -1,13 +1,8 @@
 mod traceedb;
-use traceedb::function::TraceeDb;
+use traceedb::dbg::TraceeDb;
 
-use std::borrow;
 use std::env;
-use std::error::Error;
-use std::ffi::CString;
 use std::fs;
-
-use crate::traceedb::symbol;
 
 fn main() {
     println!("NEXTDB DEBUGGER\nType \"help\" for command list!");

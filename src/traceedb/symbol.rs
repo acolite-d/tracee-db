@@ -1,7 +1,8 @@
-use gimli::{self, Dwarf, EndianSlice, RunTimeEndian};
+use gimli::{self, Dwarf};
 
 use object::{Object, ObjectSection};
 use std::borrow;
+use std::cell::Ref;
 use std::error::Error;
 
 // type TopLevelDwarfRef = Dwarf<EndianSlice<'dbg, RunTimeEndian>>;
@@ -24,7 +25,7 @@ pub fn load_dwarf_data(f_buf: &[u8]) -> Result<Dwarf<borrow::Cow<'_, [u8]>>, Box
 }
 
 pub fn src_line_to_addr(
-    dwarf_cow: Dwarf<borrow::Cow<'_, [u8]>>,
+    dwarf_cow: Ref<'_, Dwarf<borrow::Cow<'_, [u8]>>>,
     filename: &str,
     line_num: u64,
 ) -> Result<u64, Box<dyn Error>> {
@@ -36,11 +37,10 @@ pub fn src_line_to_addr(
         let unit = dwarf.unit(header)?;
 
         // Iterate over the Debugging Information Entries (DIEs) in the unit.
-        let mut depth = 0;
         let mut entries = unit.entries();
 
-        if let Some((depth, top_die)) = entries.next_dfs()? {
-            if let (Ok(Some(comp_dir_atval)), Ok(Some(name_atval))) = (
+        if let Some((_depth, top_die)) = entries.next_dfs()? {
+            if let (Ok(Some(_comp_dir_atval)), Ok(Some(name_atval))) = (
                 top_die.attr_value(gimli::DwAt(0x1b)),
                 top_die.attr_value(gimli::DwAt(0x03)),
             ) {

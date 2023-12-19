@@ -1,11 +1,15 @@
-use crate::traceedb::symbol::src_line_to_addr;
+use crate::traceedb::{dbg::BrkptRecord, symbol::src_line_to_addr};
 
-use super::function;
+use super::dbg;
 
 use nix::{sys::ptrace, unistd::Pid};
 
+use gimli::Dwarf;
+use std::borrow;
+use std::cell::Ref;
 use std::ffi::c_void;
 use std::io::{stdin, stdout, Write};
+use std::ops::Index;
 
 pub enum TargetStat {
     AwaitingCommand,
@@ -118,7 +122,7 @@ pub struct HelpMe;
 
 impl Execute for HelpMe {
     fn execute(&self, _pid: Pid) -> Result<TargetStat, &'static str> {
-        function::print_help();
+        dbg::print_help();
         Ok(TargetStat::AwaitingCommand)
     }
 }
@@ -173,23 +177,37 @@ define_help!(
     "w/write <hex address> <hex value> = write word to address in process space"
 );
 
-pub struct Breakpoint {
-    addr: *mut c_void,
-}
+pub struct Breakpoint(BrkptRecord);
 
 impl Execute for Breakpoint {
-    fn execute(&self, pid: Pid) -> Result<TargetStat, &'static str> {
-        todo!()
+    fn execute(&self, _pid: Pid) -> Result<TargetStat, &'static str> {
+        self.0.activate();
+        Ok(TargetStat::AwaitingCommand)
     }
 }
 
 define_help!(
     Breakpoint,
-    "b/breakpoint <file:line>/<address> = a standard breakpoint"
+    "b/breakpoint <file:line> = a standard breakpoint"
 );
 
+fn parse_file_and_lineno(string: &str) -> Result<(&str, u64), &'static str> {
+    let vec: Vec<&str> = string.split(':').collect();
+
+    if vec.len() != 2 {
+        return Err("Failed to parse, please supply in format of file:lineno");
+    }
+
+    if let Ok(lineno) = vec.index(1).parse::<u64>() {
+        return Ok((vec[0], lineno));
+    } else {
+        return Err("Failed to parse a line number from supplied argument!");
+    }
+}
+
 pub fn prompt_user_cmd(
-    symbols: Ref<'_, Option<Dwarf<borrow::Cow<'dwarf, [u8]>>>>
+    symbols: Option<Ref<'_, Dwarf<borrow::Cow<'_, [u8]>>>>,
+    target_pid: Pid,
 ) -> Result<Box<dyn Execute>, &'static str> {
     print!("> ");
     stdout().flush().unwrap();
@@ -247,16 +265,27 @@ pub fn prompt_user_cmd(
             }
         }
         "b" | "breakpoint" => {
-            if let Some(arg) = args_iter.next() {
-                if let Ok(addr) = src_line_to_addr() {
-                    Ok(Box::new(Breakpoint{ addr }))
-                } else {
-                    Err("Failed to resolve symbol for breakpoint")
+            if let Some(symref) = symbols {
+                let res = args_iter
+                    .next()
+                    .as_deref()
+                    .ok_or("Insufficient arguments for command!")
+                    .and_then(|arg| parse_file_and_lineno(arg))
+                    .and_then(|(fname, lno)| {
+                        src_line_to_addr(symref, fname, lno)
+                            .map_err(|_| "Failed to resolve address!")
+                    });
+
+                match res {
+                    Ok(addr) => Ok(Box::new(Breakpoint(BrkptRecord::new(
+                        target_pid,
+                        addr as *mut c_void,
+                    )))),
+                    Err(msg) => Err(msg),
                 }
             } else {
-                Err("Insufficient arguments for command!")
+                Err("Cannot resolve source lines without debug symbols!")
             }
-            Err("todo")
         }
 
         _ => Err("Could not recognize command!"),
