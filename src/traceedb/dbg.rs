@@ -1,58 +1,31 @@
-use super::symbol;
+use super::symbol::*;
 use crate::traceedb::command::*;
+use crate::traceedb::breakpoint::*;
 
 use gimli::Dwarf;
 use nix::{
-    errno::Errno,
-    libc,
     sys::ptrace,
     sys::signal::{kill, Signal},
     sys::wait::{waitpid, WaitStatus},
     unistd::{execv, fork, ForkResult, Pid},
 };
 
-use std::borrow;
+use std::{borrow, ops::Index};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::ffi::{c_uint, c_void, CStr, CString};
+use std::ffi::{c_void, CStr, CString};
 use std::io::Write;
 use std::io::{stdin, stdout};
-use std::ptr;
 
-#[derive(PartialEq, Debug)]
-pub struct BrkptRecord {
-    pid: Pid,
-    pc_addr: *mut c_void,
-    original_insn: i64,
-}
-
-impl BrkptRecord {
-    pub fn new(pid: Pid, pc_addr: *mut c_void) -> Self {
-        let original_insn = peek_text(pid, pc_addr, ptr::null_mut()).unwrap();
-
-        Self {
-            pid,
-            pc_addr,
-            original_insn,
-        }
-    }
-
-    pub fn activate(&self) {
-        let trap = ((self.original_insn & 0xFFFFFF00) | 0xCC) as *mut c_void;
-        unsafe {
-            poke_text(self.pid, self.pc_addr, trap).unwrap();
-        }
-    }
-}
 
 #[derive(Debug)]
-pub struct TraceeDb<'dwarf> {
+pub struct TraceeDbg<'dwarf> {
     program: Option<String>,
     breakpoints: RefCell<HashMap<u64, BrkptRecord>>,
     symbols: Option<RefCell<Dwarf<borrow::Cow<'dwarf, [u8]>>>>,
 }
 
-impl<'dwarf> TraceeDb<'dwarf> {
+impl<'dwarf> TraceeDbg<'dwarf> {
     pub fn builder() -> TraceeBuilder<'dwarf> {
         TraceeBuilder::default()
     }
@@ -90,6 +63,8 @@ impl<'dwarf> TraceeDb<'dwarf> {
     fn run_debugger(self, target_pid: Pid) {
         println!("Entering debugging loop...");
 
+        if self.symbols.is_none() { println!("WARNING: No debug symbols loaded!") }
+
         'await_process: loop {
             let wait_status = waitpid(target_pid, None);
 
@@ -104,24 +79,25 @@ impl<'dwarf> TraceeDb<'dwarf> {
                         let mut regs =
                             ptrace::getregs(target_pid).expect("FATAL: failed to send PTRACE_REGS");
 
+                        // self.breakpoints.borrow().get(&regs.rip).map(|brkpt| brkpt.recover_from_trap());
+
+                        dbg!(self.breakpoints.borrow());
+
                         if let Some(breakpoint) = self.breakpoints.borrow().get(&regs.rip) {
-                            unsafe {
-                                poke_text(
-                                    target_pid,
-                                    breakpoint.pc_addr,
-                                    breakpoint.original_insn as *mut c_void,
-                                )
-                                .expect("failed to write to .text section with PTRACE_POKETEXT");
-                            }
-                            regs.rip -= 1;
-                            ptrace::setregs(target_pid, regs).expect("FATAL: Failed to set regs");
+                            // unsafe {
+                            //     poke_text(
+                            //         target_pid,
+                            //         breakpoint.pc_addr,
+                            //         breakpoint.original_insn as *mut c_void,
+                            //     )
+                            //     .expect("failed to write to .text section with PTRACE_POKETEXT");
+                            // }
+                            // regs.rip -= 1;
+                            // ptrace::setregs(target_pid, regs).expect("FATAL: Failed to set regs");
                         }
 
-                        match prompt_user_cmd(
-                            self.symbols.as_ref().map(|cell| cell.borrow()),
-                            target_pid,
-                        )
-                        .and_then(|cmd| cmd.execute(target_pid))
+                        match self.prompt_user_cmd()
+                            .and_then(|cmd| cmd.execute(target_pid))
                         {
                             Ok(TargetStat::AwaitingCommand) => {
                                 continue 'await_user;
@@ -136,6 +112,11 @@ impl<'dwarf> TraceeDb<'dwarf> {
                                 break 'await_process;
                             }
 
+                            Ok(TargetStat::BreakpointAdded(brkptrec)) => {
+                                println!("Breakpoint added: {:#x}", brkptrec.pc_addr as u64);
+                                continue 'await_user;
+                            }
+
                             Err(err_msg) => {
                                 eprintln!("Err: {}", err_msg);
                                 continue;
@@ -144,13 +125,13 @@ impl<'dwarf> TraceeDb<'dwarf> {
                     }
 
                     Ok(WaitStatus::Stopped(_, Signal::SIGSEGV)) => {
-                        println!("Child process received SIGSEGV, segfaulted!");
-                        break;
+                        println!("Target process received SIGSEGV, segfaulted!");
+                        break 'await_process;
                     }
 
                     Ok(WaitStatus::Exited(_, ..)) => {
                         println!("The target program finished execution.");
-                        break;
+                        break 'await_process;
                     }
 
                     Ok(_unhandled) => {
@@ -159,11 +140,108 @@ impl<'dwarf> TraceeDb<'dwarf> {
                     }
 
                     Err(_) => {
-                        panic!("failed to wait for target program!");
+                        panic!("Critical failure: failed to wait for target program!");
                     }
                 }
             }
         }
+    }
+
+    fn prompt_user_cmd(&self) -> Result<Box<dyn Execute>, &'static str> {
+        print!("> ");
+        stdout().flush().unwrap();
+    
+        let mut user_input = String::new();
+    
+        while let Err(_) = stdin().read_line(&mut user_input) {
+            eprintln!("Err: Failed to read user input, please enter a proper command!");
+            user_input.clear();
+        }
+    
+        let mut term_iter = user_input.split_whitespace();
+    
+        let (command, mut args_iter) = (term_iter.nth(0).unwrap(), term_iter);
+    
+        match command {
+            // Commands with no operands
+            "reg" | "registers" => Ok(Box::new(ViewRegisters)),
+            "s" | "step" => Ok(Box::new(Step)),
+            "c" | "continue" => Ok(Box::new(Continue)),
+            "q" | "quit" => Ok(Box::new(Quit)),
+            "h" | "help" => Ok(Box::new(HelpMe)),
+    
+            // Commands with a single operand
+            "r" | "read" => {
+                if let Some(input_str) = args_iter.nth(0) {
+                    if let Ok(addr) = usize::from_str_radix(input_str, 16) {
+                        Ok(Box::new(ReadWord {
+                            addr: addr as *mut c_void,
+                        }))
+                    } else {
+                        Err("Failed to parse address: please supply hex value!")
+                    }
+                } else {
+                    Err("Missing the address to read from!")
+                }
+            }
+    
+            // Commands with two operands
+            "w" | "write" => {
+                if let (Some(write_addr), Some(write_word)) = (args_iter.next(), args_iter.next()) {
+                    if let (Ok(parsed_addr), Ok(parsed_word)) = (
+                        usize::from_str_radix(write_addr, 16),
+                        usize::from_str_radix(write_word, 16),
+                    ) {
+                        Ok(Box::new(WriteWord {
+                            addr: parsed_addr as *mut c_void,
+                            val: parsed_word as *mut c_void,
+                        }))
+                    } else {
+                        Err("Failed to parse args for writing word!")
+                    }
+                } else {
+                    Err("Insufficient arguments for command!")
+                }
+            }
+            "b" | "breakpoint" => {
+                if let Some(ref symref) = self.symbols {
+                    let res = args_iter
+                        .next()
+                        .as_deref()
+                        .ok_or("Insufficient arguments for command!")
+                        .and_then(|arg| parse_file_and_lineno(arg))
+                        .and_then(|(fname, lno)| {
+                            src_line_to_addr(symref.borrow(), fname, lno)
+                                .map_err(|_| "Failed to resolve address!")
+                        });
+    
+                    let _ = res.map(|addr| println!("{:#x}", addr));
+    
+                    match res {
+                        Ok(addr) => Ok(Box::new(Breakpoint(addr))),
+                        Err(msg) => Err(msg),
+                    }
+                } else {
+                    Err("Cannot resolve source lines without debug symbols!")
+                }
+            }
+    
+            _ => Err("Could not recognize command!"),
+        }
+    }
+}
+
+fn parse_file_and_lineno(string: &str) -> Result<(&str, u64), &'static str> {
+    let vec: Vec<&str> = string.split(':').collect();
+
+    if vec.len() != 2 {
+        return Err("Failed to parse, please supply in format of file:lineno");
+    }
+
+    if let Ok(lineno) = vec.index(1).parse::<u64>() {
+        return Ok((vec[0], lineno));
+    } else {
+        return Err("Failed to parse a line number from supplied argument!");
     }
 }
 
@@ -185,12 +263,12 @@ impl<'dwarf> TraceeBuilder<'dwarf> {
     // }
 
     pub fn dwarf_symbols(mut self, file_buf: &'dwarf [u8]) -> Self {
-        self.symbols = symbol::load_dwarf_data(file_buf).ok();
+        self.symbols = load_dwarf_data(file_buf).ok();
         self
     }
 
-    pub fn build(self) -> TraceeDb<'dwarf> {
-        TraceeDb {
+    pub fn build(self) -> TraceeDbg<'dwarf> {
+        TraceeDbg {
             program: self.program,
             breakpoints: RefCell::new(HashMap::default()),
             symbols: match self.symbols {
@@ -199,45 +277,6 @@ impl<'dwarf> TraceeBuilder<'dwarf> {
             },
         }
     }
-}
-
-pub unsafe fn poke_text(pid: Pid, addr: *mut c_void, val: *mut c_void) -> Result<(), &'static str> {
-    Errno::result(libc::ptrace(
-        ptrace::Request::PTRACE_POKETEXT as c_uint,
-        libc::pid_t::from(pid),
-        addr,
-        val,
-    ))
-    .map(|_| ())
-    .map_err(|_| "Failed at PTRACE_POKETEXT message!")
-}
-
-pub fn peek_text(pid: Pid, addr: *mut c_void, data: *mut c_void) -> Result<i64, &'static str> {
-    let ret = unsafe {
-        Errno::clear();
-        libc::ptrace(
-            ptrace::Request::PTRACE_PEEKTEXT as c_uint,
-            libc::pid_t::from(pid),
-            addr,
-            data,
-        )
-    };
-    match Errno::result(ret) {
-        Ok(..) | Err(Errno::UnknownErrno) => Ok(ret),
-        Err(..) => Err("Failed to send PTRACE_PEEKTEXT message!"),
-    }
-}
-
-pub fn print_help() {
-    println!("List of Commands:");
-    Step::help();
-    Continue::help();
-    ViewRegisters::help();
-    ReadWord::help();
-    WriteWord::help();
-    Breakpoint::help();
-    Quit::help();
-    HelpMe::help();
 }
 
 pub fn run_get_pid_dialogue() -> Pid {

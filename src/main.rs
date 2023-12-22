@@ -1,5 +1,5 @@
 mod traceedb;
-use traceedb::dbg::TraceeDb;
+use traceedb::dbg::TraceeDbg;
 
 use std::env;
 use std::fs;
@@ -10,7 +10,7 @@ fn main() {
     let mut args = env::args().skip(1).take(2);
     let elf_buf: Vec<u8>;
 
-    let mut builder = TraceeDb::builder();
+    let mut builder = TraceeDbg::builder();
 
     if let Some(prog) = args.next() {
         builder = builder.program(prog)

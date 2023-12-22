@@ -53,7 +53,7 @@ pub fn src_line_to_addr(
                     while let Ok(Some((_header, row))) = rows.next_row() {
                         if let Some(l) = row.line().map(u64::from) {
                             if l == line_num {
-                                return Ok(l);
+                                return Ok(row.address());
                             }
                         }
                     }
@@ -62,5 +62,5 @@ pub fn src_line_to_addr(
         }
     }
 
-    Ok(0x0)
+    Err(Box::new(gimli::Error::InvalidAddressRange))
 }
