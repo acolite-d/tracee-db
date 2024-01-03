@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 nix = { version = "0.27.1", features = ["process", "ptrace", "signal"] }
 gimli = { version = "0.28.1", features = ["std", "read"] }
+object = { version = "0.32.1", feature = ["read"] }

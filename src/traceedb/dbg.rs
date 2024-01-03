@@ -1,6 +1,6 @@
 use super::symbol::*;
-use crate::traceedb::command::*;
 use crate::traceedb::breakpoint::*;
+use crate::traceedb::command::*;
 
 use gimli::Dwarf;
 use nix::{
@@ -10,13 +10,12 @@ use nix::{
     unistd::{execv, fork, ForkResult, Pid},
 };
 
-use std::{borrow, ops::Index};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_void, CStr, CString};
 use std::io::Write;
 use std::io::{stdin, stdout};
-
+use std::{borrow, ops::Index};
 
 #[derive(Debug)]
 pub struct TraceeDbg<'dwarf> {
@@ -63,7 +62,9 @@ impl<'dwarf> TraceeDbg<'dwarf> {
     fn run_debugger(self, target_pid: Pid) {
         println!("Entering debugging loop...");
 
-        if self.symbols.is_none() { println!("WARNING: No debug symbols loaded!") }
+        if self.symbols.is_none() {
+            println!("WARNING: No debug symbols loaded!")
+        }
 
         'await_process: loop {
             let wait_status = waitpid(target_pid, None);
@@ -96,7 +97,8 @@ impl<'dwarf> TraceeDbg<'dwarf> {
                             // ptrace::setregs(target_pid, regs).expect("FATAL: Failed to set regs");
                         }
 
-                        match self.prompt_user_cmd()
+                        match self
+                            .prompt_user_cmd()
                             .and_then(|cmd| cmd.execute(target_pid))
                         {
                             Ok(TargetStat::AwaitingCommand) => {
@@ -150,18 +152,18 @@ impl<'dwarf> TraceeDbg<'dwarf> {
     fn prompt_user_cmd(&self) -> Result<Box<dyn Execute>, &'static str> {
         print!("> ");
         stdout().flush().unwrap();
-    
+
         let mut user_input = String::new();
-    
+
         while let Err(_) = stdin().read_line(&mut user_input) {
             eprintln!("Err: Failed to read user input, please enter a proper command!");
             user_input.clear();
         }
-    
+
         let mut term_iter = user_input.split_whitespace();
-    
+
         let (command, mut args_iter) = (term_iter.nth(0).unwrap(), term_iter);
-    
+
         match command {
             // Commands with no operands
             "reg" | "registers" => Ok(Box::new(ViewRegisters)),
@@ -169,38 +171,39 @@ impl<'dwarf> TraceeDbg<'dwarf> {
             "c" | "continue" => Ok(Box::new(Continue)),
             "q" | "quit" => Ok(Box::new(Quit)),
             "h" | "help" => Ok(Box::new(HelpMe)),
-    
+
             // Commands with a single operand
             "r" | "read" => {
-                if let Some(input_str) = args_iter.nth(0) {
-                    if let Ok(addr) = usize::from_str_radix(input_str, 16) {
-                        Ok(Box::new(ReadWord {
-                            addr: addr as *mut c_void,
-                        }))
-                    } else {
-                        Err("Failed to parse address: please supply hex value!")
-                    }
-                } else {
-                    Err("Missing the address to read from!")
+                let result = args_iter
+                    .nth(0)
+                    .ok_or("Missing the address to read from")
+                    .and_then(|arg| {
+                        usize::from_str_radix(arg, 16)
+                            .map_err(|_| "Failed to parse: please supply hex value!")
+                    });
+
+                match result {
+                    Ok(addr) => Ok(Box::new(ReadWord {
+                        addr: addr as *mut c_void,
+                    })),
+
+                    Err(str) => Err(str),
                 }
             }
-    
+
             // Commands with two operands
             "w" | "write" => {
-                if let (Some(write_addr), Some(write_word)) = (args_iter.next(), args_iter.next()) {
-                    if let (Ok(parsed_addr), Ok(parsed_word)) = (
-                        usize::from_str_radix(write_addr, 16),
-                        usize::from_str_radix(write_word, 16),
-                    ) {
-                        Ok(Box::new(WriteWord {
-                            addr: parsed_addr as *mut c_void,
-                            val: parsed_word as *mut c_void,
-                        }))
-                    } else {
-                        Err("Failed to parse args for writing word!")
-                    }
-                } else {
-                    Err("Insufficient arguments for command!")
+                let mut res = args_iter
+                    .take(2)
+                    .map(|arg| usize::from_str_radix(arg, 16));
+
+                match (res.next(), res.next()) {
+                    (Some(Ok(addr)), Some(Ok(val))) => Ok(Box::new(WriteWord {
+                        addr: addr as *mut c_void,
+                        val: val as *mut c_void,
+                    })),
+
+                    _ => Err("Failed to parse args for writing word!"),
                 }
             }
             "b" | "breakpoint" => {
@@ -214,9 +217,9 @@ impl<'dwarf> TraceeDbg<'dwarf> {
                             src_line_to_addr(symref.borrow(), fname, lno)
                                 .map_err(|_| "Failed to resolve address!")
                         });
-    
+
                     let _ = res.map(|addr| println!("{:#x}", addr));
-    
+
                     match res {
                         Ok(addr) => Ok(Box::new(Breakpoint(addr))),
                         Err(msg) => Err(msg),
@@ -225,7 +228,7 @@ impl<'dwarf> TraceeDbg<'dwarf> {
                     Err("Cannot resolve source lines without debug symbols!")
                 }
             }
-    
+
             _ => Err("Could not recognize command!"),
         }
     }
@@ -281,7 +284,7 @@ impl<'dwarf> TraceeBuilder<'dwarf> {
 
 pub fn run_get_pid_dialogue() -> Pid {
     let mut input = String::new();
-    let mut pid: Pid;
+    let mut pid: Result<Pid, &str>;
 
     loop {
         print!("Please enter a target PID: ");
@@ -289,25 +292,25 @@ pub fn run_get_pid_dialogue() -> Pid {
 
         stdin()
             .read_line(&mut input)
-            .expect("Did not enter correct string!");
+            .expect("Failed to read in line from input!");
 
-        if let Ok(id) = input.trim().parse::<i32>() {
-            pid = Pid::from_raw(id);
-
-            if let Ok(_) = kill(pid, None) {
-                break;
-            } else {
-                println!(
-                    "Process PID {} does not exist, please enter an active process",
-                    pid
-                );
-            }
-        } else {
-            println!("Please input a proper integer value for process ID!");
-        }
+        pid = input.as_str()
+            .trim()
+            .parse::<i32>()
+            .map(Pid::from_raw)
+            .map_err(|_| "Please supply an integer for PID!")
+            .and_then(|pid| {
+                if let Ok(_) = kill(pid, None) {
+                    Ok(pid)
+                } else {
+                    Err("Process does not exist!")
+                }
+            });
+            
+        if let Ok(_) = pid { break; }
 
         input.clear();
     }
 
-    pid
+    pid.unwrap()
 }

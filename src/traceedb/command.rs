@@ -7,7 +7,7 @@ pub enum TargetStat {
     AwaitingCommand,
     Running,
     Killed,
-    BreakpointAdded(BrkptRecord)
+    BreakpointAdded(BrkptRecord),
 }
 
 pub trait Execute {
@@ -182,7 +182,10 @@ pub struct Breakpoint(pub u64);
 
 impl Execute for Breakpoint {
     fn execute(&self, pid: Pid) -> Result<TargetStat, &'static str> {
-        Ok(TargetStat::BreakpointAdded(BrkptRecord::new(pid, self.0 as *mut c_void)))
+        Ok(TargetStat::BreakpointAdded(BrkptRecord::new(
+            pid,
+            self.0 as *mut c_void,
+        )))
     }
 }
 
@@ -190,5 +193,3 @@ define_help!(
     Breakpoint,
     "b/breakpoint <file:line> = a standard breakpoint"
 );
-
-

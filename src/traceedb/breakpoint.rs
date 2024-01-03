@@ -1,13 +1,7 @@
-use nix::{
-    errno::Errno,
-    libc,
-    sys::ptrace,
-    unistd::Pid,
-};
+use nix::{errno::Errno, libc, sys::ptrace, unistd::Pid};
 
+use std::ffi::{c_uint, c_void};
 use std::ptr;
-use std::ffi::{c_void, c_uint};
-
 
 #[derive(PartialEq, Eq, Debug)]
 pub struct BrkptRecord {
@@ -24,7 +18,7 @@ impl BrkptRecord {
         Self {
             pid,
             pc_addr,
-            original_insn
+            original_insn,
         }
     }
 
