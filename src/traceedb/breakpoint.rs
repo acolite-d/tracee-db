@@ -11,13 +11,13 @@ pub struct BrkptRecord {
 }
 
 impl BrkptRecord {
-    pub fn new(pid: Pid, pc_addr: *mut c_void) -> Self {
-        //let original_insn = ptrace::read(pid, pc_addr).unwrap();
-        let original_insn = peek_text(pid, pc_addr, ptr::null_mut()).unwrap();
+    pub fn new(pid: Pid, text_addr: *mut c_void) -> Self {
+        let original_insn =
+            ptrace::read(pid, text_addr).expect("Failed to read text region for breakpoint!");
 
         Self {
             pid,
-            pc_addr,
+            pc_addr: text_addr,
             original_insn,
         }
     }
@@ -25,38 +25,18 @@ impl BrkptRecord {
     pub fn activate(&self) {
         let trap = ((self.original_insn & 0xFFFFFF00) | 0xCC) as *mut c_void;
         unsafe {
-            poke_text(self.pid, self.pc_addr, trap).unwrap();
+            ptrace::write(self.pid, self.pc_addr, trap).unwrap();
         }
     }
 
     pub fn recover_from_trap(&self) {
-        todo!()
-    }
-}
-
-unsafe fn poke_text(pid: Pid, addr: *mut c_void, val: *mut c_void) -> Result<(), &'static str> {
-    Errno::result(libc::ptrace(
-        ptrace::Request::PTRACE_POKETEXT as c_uint,
-        libc::pid_t::from(pid),
-        addr,
-        val,
-    ))
-    .map(|_| ())
-    .map_err(|_| "Failed to send PTRACE_POKETEXT message!")
-}
-
-fn peek_text(pid: Pid, addr: *mut c_void, data: *mut c_void) -> Result<i64, &'static str> {
-    let ret = unsafe {
-        Errno::clear();
-        libc::ptrace(
-            ptrace::Request::PTRACE_PEEKTEXT as c_uint,
-            libc::pid_t::from(pid),
-            addr,
-            data,
-        )
-    };
-    match Errno::result(ret) {
-        Ok(..) | Err(Errno::UnknownErrno) => Ok(ret),
-        Err(..) => Err("Failed to send PTRACE_PEEKTEXT message!"),
+        println!("Recovering from trap!");
+        unsafe {
+            ptrace::write(self.pid, self.pc_addr, self.original_insn as *mut c_void)
+                .expect("failed to write to .text section with PTRACE_POKEDATA");
+        }
+        let mut regs = ptrace::getregs(self.pid).expect("FATAL: Failed to send PTRACE_GETREGS");
+        regs.rip -= 1;
+        ptrace::setregs(self.pid, regs).expect("FATAL: Failed to send message PTRACE_SETREGS");
     }
 }

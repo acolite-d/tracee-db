@@ -4,11 +4,13 @@ use crate::traceedb::command::*;
 
 use gimli::Dwarf;
 use nix::{
+    sys::personality,
     sys::ptrace,
     sys::signal::{kill, Signal},
     sys::wait::{waitpid, WaitStatus},
     unistd::{execv, fork, ForkResult, Pid},
 };
+use procmaps::Mappings;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -22,6 +24,7 @@ pub struct TraceeDbg<'dwarf> {
     program: Option<String>,
     breakpoints: RefCell<HashMap<u64, BrkptRecord>>,
     symbols: Option<RefCell<Dwarf<borrow::Cow<'dwarf, [u8]>>>>,
+    position_ind_p: bool,
 }
 
 impl<'dwarf> TraceeDbg<'dwarf> {
@@ -55,6 +58,11 @@ impl<'dwarf> TraceeDbg<'dwarf> {
     fn run_target(self, prog_name: &CStr) {
         println!("Running traceable target program {:?}", prog_name);
 
+        let tracee_persona = personality::get().expect("Critical Err: cannot get process persona!");
+
+        personality::set(tracee_persona | personality::Persona::ADDR_NO_RANDOMIZE)
+            .expect("Critical Err: cannot set tracee process personality!");
+
         ptrace::traceme().expect("Ptrace failed, cannot debug!");
         let _ = execv(prog_name, &[] as &[&CStr]).expect("Failed to spawn process");
     }
@@ -77,29 +85,19 @@ impl<'dwarf> TraceeDbg<'dwarf> {
                         // associated breakpoint. If PC == BPT_PC, then replace trap,
                         // rollback PC, and proceed.
 
-                        let mut regs =
+                        let regs =
                             ptrace::getregs(target_pid).expect("FATAL: failed to send PTRACE_REGS");
 
-                        // self.breakpoints.borrow().get(&regs.rip).map(|brkpt| brkpt.recover_from_trap());
+                        self.breakpoints
+                            .borrow()
+                            .get(&regs.rip)
+                            .map(|brkpt| brkpt.recover_from_trap());
 
-                        dbg!(self.breakpoints.borrow());
-
-                        if let Some(breakpoint) = self.breakpoints.borrow().get(&regs.rip) {
-                            // unsafe {
-                            //     poke_text(
-                            //         target_pid,
-                            //         breakpoint.pc_addr,
-                            //         breakpoint.original_insn as *mut c_void,
-                            //     )
-                            //     .expect("failed to write to .text section with PTRACE_POKETEXT");
-                            // }
-                            // regs.rip -= 1;
-                            // ptrace::setregs(target_pid, regs).expect("FATAL: Failed to set regs");
-                        }
+                        // dbg!(self.breakpoints.borrow());
 
                         match self
                             .prompt_user_cmd()
-                            .and_then(|cmd| cmd.execute(target_pid))
+                            .and_then(|cmd| cmd.execute(target_pid, self.position_ind_p))
                         {
                             Ok(TargetStat::AwaitingCommand) => {
                                 continue 'await_user;
@@ -115,7 +113,15 @@ impl<'dwarf> TraceeDbg<'dwarf> {
                             }
 
                             Ok(TargetStat::BreakpointAdded(brkptrec)) => {
-                                println!("Breakpoint added: {:#x}", brkptrec.pc_addr as u64);
+                                println!(
+                                    "Breakpoint added, activating: {:#x}",
+                                    brkptrec.pc_addr as u64
+                                );
+                                brkptrec.activate();
+                                self.breakpoints
+                                    .borrow_mut()
+                                    .insert((brkptrec.pc_addr.wrapping_add(1)) as u64, brkptrec);
+
                                 continue 'await_user;
                             }
 
@@ -193,9 +199,7 @@ impl<'dwarf> TraceeDbg<'dwarf> {
 
             // Commands with two operands
             "w" | "write" => {
-                let mut res = args_iter
-                    .take(2)
-                    .map(|arg| usize::from_str_radix(arg, 16));
+                let mut res = args_iter.take(2).map(|arg| usize::from_str_radix(arg, 16));
 
                 match (res.next(), res.next()) {
                     (Some(Ok(addr)), Some(Ok(val))) => Ok(Box::new(WriteWord {
@@ -217,8 +221,6 @@ impl<'dwarf> TraceeDbg<'dwarf> {
                             src_line_to_addr(symref.borrow(), fname, lno)
                                 .map_err(|_| "Failed to resolve address!")
                         });
-
-                    let _ = res.map(|addr| println!("{:#x}", addr));
 
                     match res {
                         Ok(addr) => Ok(Box::new(Breakpoint(addr))),
@@ -252,6 +254,7 @@ fn parse_file_and_lineno(string: &str) -> Result<(&str, u64), &'static str> {
 pub struct TraceeBuilder<'dwarf> {
     program: Option<String>,
     symbols: Option<Dwarf<borrow::Cow<'dwarf, [u8]>>>,
+    position_ind_p: bool,
 }
 
 impl<'dwarf> TraceeBuilder<'dwarf> {
@@ -260,10 +263,10 @@ impl<'dwarf> TraceeBuilder<'dwarf> {
         self
     }
 
-    // pub fn initial_breakpt(mut self, initial_breakpt: Option<String>) -> Self {
-    //     self.initial_breakpt = initial_breakpt;
-    //     self
-    // }
+    pub fn is_position_independent(mut self, pred: bool) -> Self {
+        self.position_ind_p = pred;
+        self
+    }
 
     pub fn dwarf_symbols(mut self, file_buf: &'dwarf [u8]) -> Self {
         self.symbols = load_dwarf_data(file_buf).ok();
@@ -278,6 +281,7 @@ impl<'dwarf> TraceeBuilder<'dwarf> {
                 Some(sym) => Some(RefCell::new(sym)),
                 None => None,
             },
+            position_ind_p: self.position_ind_p,
         }
     }
 }
@@ -294,7 +298,8 @@ pub fn run_get_pid_dialogue() -> Pid {
             .read_line(&mut input)
             .expect("Failed to read in line from input!");
 
-        pid = input.as_str()
+        pid = input
+            .as_str()
             .trim()
             .parse::<i32>()
             .map(Pid::from_raw)
@@ -306,8 +311,10 @@ pub fn run_get_pid_dialogue() -> Pid {
                     Err("Process does not exist!")
                 }
             });
-            
-        if let Ok(_) = pid { break; }
+
+        if let Ok(_) = pid {
+            break;
+        }
 
         input.clear();
     }

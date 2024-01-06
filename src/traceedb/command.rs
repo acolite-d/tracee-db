@@ -1,5 +1,6 @@
 use crate::traceedb::breakpoint::BrkptRecord;
 use nix::{sys::ptrace, unistd::Pid};
+use procmaps::Mappings;
 
 use std::ffi::c_void;
 
@@ -11,7 +12,7 @@ pub enum TargetStat {
 }
 
 pub trait Execute {
-    fn execute(&self, pid: Pid) -> Result<TargetStat, &'static str>;
+    fn execute(&self, pid: Pid, is_et_dyn: bool) -> Result<TargetStat, &'static str>;
 }
 
 pub trait Help {
@@ -32,7 +33,7 @@ macro_rules! define_help {
 pub struct Step;
 
 impl Execute for Step {
-    fn execute(&self, pid: Pid) -> Result<TargetStat, &'static str> {
+    fn execute(&self, pid: Pid, is_et_dyn: bool) -> Result<TargetStat, &'static str> {
         ptrace::step(pid, None)
             .map(|_| TargetStat::Running)
             .map_err(|err_no| {
@@ -48,7 +49,7 @@ define_help!(Step, "s/step = step through process");
 pub struct Continue;
 
 impl Execute for Continue {
-    fn execute(&self, pid: Pid) -> Result<TargetStat, &'static str> {
+    fn execute(&self, pid: Pid, is_et_dyn: bool) -> Result<TargetStat, &'static str> {
         ptrace::cont(pid, None)
             .map(|_| TargetStat::Running)
             .map_err(|err_no| {
@@ -64,7 +65,7 @@ define_help!(Continue, "c/continue = run through process");
 pub struct ViewRegisters;
 
 impl Execute for ViewRegisters {
-    fn execute(&self, pid: Pid) -> Result<TargetStat, &'static str> {
+    fn execute(&self, pid: Pid, is_et_dyn: bool) -> Result<TargetStat, &'static str> {
         match ptrace::getregs(pid) {
             Ok(regs) => {
                 println!(
@@ -98,7 +99,7 @@ define_help!(ViewRegisters, "reg/registers = view register contents");
 pub struct Quit;
 
 impl Execute for Quit {
-    fn execute(&self, pid: Pid) -> Result<TargetStat, &'static str> {
+    fn execute(&self, pid: Pid, is_et_dyn: bool) -> Result<TargetStat, &'static str> {
         ptrace::kill(pid)
             .map(|_| TargetStat::Killed)
             .map_err(|err_no| {
@@ -114,7 +115,7 @@ define_help!(Quit, "q/quit = quit debugger and kill process");
 pub struct HelpMe;
 
 impl Execute for HelpMe {
-    fn execute(&self, _pid: Pid) -> Result<TargetStat, &'static str> {
+    fn execute(&self, pid: Pid, is_et_dyn: bool) -> Result<TargetStat, &'static str> {
         println!("List of Commands:");
         Step::help();
         Continue::help();
@@ -124,6 +125,7 @@ impl Execute for HelpMe {
         Breakpoint::help();
         Quit::help();
         HelpMe::help();
+
         Ok(TargetStat::AwaitingCommand)
     }
 }
@@ -136,7 +138,7 @@ pub struct ReadWord {
 }
 
 impl Execute for ReadWord {
-    fn execute(&self, pid: Pid) -> Result<TargetStat, &'static str> {
+    fn execute(&self, pid: Pid, is_et_dyn: bool) -> Result<TargetStat, &'static str> {
         ptrace::read(pid, self.addr)
             .map(|val| {
                 println!("@ {:#0x}: {:#0x}", self.addr as usize, val);
@@ -161,7 +163,7 @@ pub struct WriteWord {
 }
 
 impl Execute for WriteWord {
-    fn execute(&self, pid: Pid) -> Result<TargetStat, &'static str> {
+    fn execute(&self, pid: Pid, is_et_dyn: bool) -> Result<TargetStat, &'static str> {
         unsafe {
             ptrace::write(pid, self.addr, self.val)
                 .map(|_| TargetStat::AwaitingCommand)
@@ -181,11 +183,16 @@ define_help!(
 pub struct Breakpoint(pub u64);
 
 impl Execute for Breakpoint {
-    fn execute(&self, pid: Pid) -> Result<TargetStat, &'static str> {
-        Ok(TargetStat::BreakpointAdded(BrkptRecord::new(
-            pid,
-            self.0 as *mut c_void,
-        )))
+    fn execute(&self, pid: Pid, is_et_dyn: bool) -> Result<TargetStat, &'static str> {
+        let mut text_addr = self.0;
+
+        if is_et_dyn {
+            text_addr += get_segment_base_addr(pid)? as u64
+        }
+
+        let brkptrec = BrkptRecord::new(pid, text_addr as *mut c_void);
+
+        Ok(TargetStat::BreakpointAdded(brkptrec))
     }
 }
 
@@ -193,3 +200,12 @@ define_help!(
     Breakpoint,
     "b/breakpoint <file:line> = a standard breakpoint"
 );
+
+fn get_segment_base_addr(pid: Pid) -> Result<usize, &'static str> {
+    Mappings::from_pid(pid.into())
+        .map_err(|_| "Failed to find segment base")?
+        .iter()
+        .nth(0)
+        .map(|mem_region| mem_region.base)
+        .ok_or("Failed to find segment base")
+}

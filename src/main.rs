@@ -1,4 +1,6 @@
 mod traceedb;
+use object::Object;
+use object::ObjectKind;
 use traceedb::dbg::TraceeDbg;
 
 use std::env;
@@ -13,7 +15,16 @@ fn main() {
     let mut builder = TraceeDbg::builder();
 
     if let Some(prog) = args.next() {
-        builder = builder.program(prog)
+        let data = fs::read(prog.as_str()).expect("Given program not found, exiting");
+        let file = object::File::parse(&*data).expect("Failed to parse program as ELF, exiting");
+
+        let is_et_dyn = match file.kind() {
+            ObjectKind::Executable => false,
+            ObjectKind::Dynamic => true,
+            _ => panic!("Please provide an ELF executable of type ET_DYN or ET_EXEC!"),
+        };
+
+        builder = builder.program(prog).is_position_independent(is_et_dyn);
     }
 
     if let Some(dbg_file) = args.next() {
