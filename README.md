@@ -15,3 +15,20 @@ cargo build
 cargo run -- myexecutable
 ```
 
+```
+TRACEEDB DEBUGGER
+Type "help" for command list!
+Spawned child process 162194
+Entering debugging loop...
+Running traceable target program "test"
+> help
+List of Commands:
+s/step = step through process
+c/continue = run through process
+reg/registers = view register contents
+r/read <hex address> = read word from process address space
+w/write <hex address> <hex value> = write word to address in process space
+b/breakpoint <file:line> = a standard breakpoint
+q/quit = quit debugger and kill process
+h/help = prints this help message
+```
